@@ -1,0 +1,29 @@
+Building my own version of Mosh
+-------------------------------
+
+fmeschbe / 9-Okt-2021
+
+* fork https://github.com/mobile-shell/mosh
+* git clone https://github.com/fmeschbe/mosh
+* cd mosh
+* git branch fmeschbe/pr1104
+* wget https://patch-diff.githubusercontent.com/raw/mobile-shell/mosh/pull/1104.patch
+* patch -p1 < 1104.patch
+* git add notes.txt 1104.patch
+* git comit -m "Apply PR 1104"
+* git push
+* sudo apt install protobuf-compiler libprotobuf-dev libncurses5-dev zlib1g-dev libutempter-dev libssl-dev
+* sudo apt install autoconf
+* ./autogen.sh
+* ./configure --enable-compile-warnings=error
+* make
+* make install ???
+* sudo apt install git-buildpackage
+* ./build-package.sh
+
+Links:
+-----
+
+* https://mosh.org/#getting
+* https://github.com/mobile-shell/mosh/pull/1104
+* https://docs.blink.sh/basics/tips-and-tricks#tmux-copypaste-using-osc52

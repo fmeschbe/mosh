@@ -1,0 +1,226 @@
+From 3c233724528f0effcfdb5d0364eed10ec38d1890 Mon Sep 17 00:00:00 2001
+From: Mike Gulick <mgulick@gmail.com>
+Date: Wed, 15 Jul 2020 18:02:42 -0400
+Subject: [PATCH 1/2] Support additional OSC 52 clipboard types
+
+The OSC 52 escape sequence supports specifying which X selection
+buffer place to the selection into.  The protocol format is:
+
+  \033]52;C;D\007
+
+The C parameter determines the selection buffer.  It consists of zero
+or more of the following characters:
+
+ c: CLIPBOARD
+ p: PRIMARY
+ q: SECONDARY
+ s: XTerm-selected (based on XTerm.vt100.selectToClipboard)
+ 0-7: Numbered cut buffer
+
+The default if left blank is 's0', representing the configurable
+primary/clipboard selection and cut buffer 0. [1]
+
+D is the base64 encoded text to place in the selection buffer.
+
+This patch modifies the transferred clipboard data to include both the
+selection parameter and the base64 text.  I.e. previously the
+transferred clipboard data only contained 'D', and now it contains
+'C;D'.
+
+To test this functionality:
+
+  1. Open XTerm
+  2. Ctrl-Right Click and select 'Allow Window Ops'
+  3. Connect to a server w/ mosh
+  4. Run the following in the remote connection:
+     $ printf "\033]52;c;$(echo test1234 | base64)\007"
+     $ printf "\033]52;p;$(echo test2345 | base64)\007"
+     $ printf "\033]52;q;$(echo test3456 | base64)\007"
+  6. Open another terminal on the local machine and run:
+     $ xclip -o -selection clipboard
+     test1234
+     $ xclip -o -selection primary
+     test2345
+     $ xclip -o -selection secondary
+     test3456
+  7. You can also try:
+     $ printf "\033]52;;$(echo testdefault | base64)\007"
+     (This should update either the clipboard or primary selection
+     based on the Xterm settings)
+  8. To test the cut buffers you can use the same
+     procedure, substituting the cut buffer number in C, and then use
+     'xcutsel' to transfer the data from the cut buffer to the PRIMARY
+     selection, where it can then be viewed with 'xclip'.
+
+Note, I observed that XTerm does not currently (as of XTerm patch 358)
+support specifying more than one value in C.  The specification does
+support it, and this appears to just be a simple bug in XTerm (a patch
+has been submitted to the maintainer to fix it).
+
+[1] https://github.com/ThomasDickey/xterm-snapshots/blob/master/ctlseqs.txt
+
+Fixes #967.
+---
+ src/terminal/terminaldisplay.cc   |  2 +-
+ src/terminal/terminalfunctions.cc | 11 +++++++----
+ 2 files changed, 8 insertions(+), 5 deletions(-)
+
+diff --git a/src/terminal/terminaldisplay.cc b/src/terminal/terminaldisplay.cc
+index e7595c24..7f508efd 100644
+--- a/src/terminal/terminaldisplay.cc
++++ b/src/terminal/terminaldisplay.cc
+@@ -112,7 +112,7 @@ std::string Display::new_frame( bool initialized, const Framebuffer &last, const
+ 
+   /* has clipboard changed? */
+   if (f.get_clipboard() != frame.last_frame.get_clipboard()) {
+-    frame.append( "\033]52;c;" );
++    frame.append( "\033]52;" );
+     const title_type &clipboard( f.get_clipboard() );
+     for ( title_type::const_iterator i = clipboard.begin();
+           i != clipboard.end();
+diff --git a/src/terminal/terminalfunctions.cc b/src/terminal/terminalfunctions.cc
+index ca141dd3..ca59841b 100644
+--- a/src/terminal/terminalfunctions.cc
++++ b/src/terminal/terminalfunctions.cc
+@@ -591,12 +591,15 @@ static Function func_CSI_DECSTR( CSI, "!p", CSI_DECSTR );
+ /* xterm uses an Operating System Command to set the window title */
+ void Dispatcher::OSC_dispatch( const Parser::OSC_End *act __attribute((unused)), Framebuffer *fb )
+ {
+-  /* handle osc copy clipboard sequence 52;c; */
++  /* Handle OSC copy clipboard sequence 52;c; and variants */
+   if ( OSC_string.size() >= 5 && OSC_string[ 0 ] == L'5' &&
+-       OSC_string[ 1 ] == L'2' && OSC_string[ 2 ] == L';' &&
+-       OSC_string[ 3 ] == L'c' && OSC_string[ 4 ] == L';') {
++       OSC_string[ 1 ] == L'2' && OSC_string[ 2 ] == L';') {
++    /* Capture the options and clipboard contents
++       e.g. '52;c;bW9zaCBpcyBncmVhdAo='
++                ^^^^^^^^^^^^^^^^^^^^^^^
++                capture this part */
+       Terminal::Framebuffer::title_type clipboard(
+-              OSC_string.begin() + 5, OSC_string.end() );
++              OSC_string.begin() + 3, OSC_string.end() );
+       fb->set_clipboard( clipboard );
+   /* handle osc terminal title sequence */
+   } else if ( OSC_string.size() >= 1 ) {
+
+From e92212874edf6a7b7a8659f66a9e467e3c37f73e Mon Sep 17 00:00:00 2001
+From: Mike Gulick <mgulick@gmail.com>
+Date: Wed, 22 Jul 2020 21:10:05 -0400
+Subject: [PATCH 2/2] Support duplicate clipboard updates
+
+Instead of using the contents of the clipboard to determine if the
+user has copied any text, use a sequence number that is updated
+whenever text is copied.  Consider the following scenario (as
+described in #1090):
+
+1. User copies text 'abc' on remote machine via mosh.
+2. User copies text 'xyz' on local machine.
+3. User copies text 'abc' on remote machine again.
+
+The local clipboard will still has 'xyz' because the most recent copy
+text 'abc' matches the last text copied via mosh, so it does not
+detect that the user copied new text and does not update the local
+clipboard.
+
+This patch updates detection of newly copied text via a sequence
+number.  This number is an 8-bit unsigned integer that is updated
+every time new text is copied.  This will roll over after 256
+clipboard updates, but that is fine as we only care about it being
+different than the last value.
+
+Fixes #1090.
+Fixes #637.
+---
+ src/terminal/terminaldisplay.cc     |  2 +-
+ src/terminal/terminalframebuffer.cc |  7 +++++--
+ src/terminal/terminalframebuffer.h  | 11 +++++++++--
+ 3 files changed, 15 insertions(+), 5 deletions(-)
+
+diff --git a/src/terminal/terminaldisplay.cc b/src/terminal/terminaldisplay.cc
+index 7f508efd..6cb2fd03 100644
+--- a/src/terminal/terminaldisplay.cc
++++ b/src/terminal/terminaldisplay.cc
+@@ -111,7 +111,7 @@ std::string Display::new_frame( bool initialized, const Framebuffer &last, const
+   }
+ 
+   /* has clipboard changed? */
+-  if (f.get_clipboard() != frame.last_frame.get_clipboard()) {
++  if (f.get_clipboard_seqnum() != frame.last_frame.get_clipboard_seqnum()) {
+     frame.append( "\033]52;" );
+     const title_type &clipboard( f.get_clipboard() );
+     for ( title_type::const_iterator i = clipboard.begin();
+diff --git a/src/terminal/terminalframebuffer.cc b/src/terminal/terminalframebuffer.cc
+index 2751f3b7..1b7406d6 100644
+--- a/src/terminal/terminalframebuffer.cc
++++ b/src/terminal/terminalframebuffer.cc
+@@ -78,7 +78,8 @@ DrawState::DrawState( int s_width, int s_height )
+ }
+ 
+ Framebuffer::Framebuffer( int s_width, int s_height )
+-  : rows(), icon_name(), window_title(), clipboard(), bell_count( 0 ), title_initialized( false ), ds( s_width, s_height )
++  : rows(), icon_name(), window_title(), clipboard(), bell_count( 0 ),
++    title_initialized( false ), clipboard_seqnum( 0 ), ds( s_width, s_height )
+ {
+   assert( s_height > 0 );
+   assert( s_width > 0 );
+@@ -90,7 +91,7 @@ Framebuffer::Framebuffer( int s_width, int s_height )
+ Framebuffer::Framebuffer( const Framebuffer &other )
+   : rows( other.rows ), icon_name( other.icon_name ), window_title( other.window_title ),
+     clipboard( other.clipboard ), bell_count( other.bell_count ),
+-    title_initialized( other.title_initialized ), ds( other.ds )
++    title_initialized( other.title_initialized ), clipboard_seqnum( other.clipboard_seqnum ), ds( other.ds )
+ {
+ }
+ 
+@@ -103,6 +104,7 @@ Framebuffer & Framebuffer::operator=( const Framebuffer &other )
+     clipboard = other.clipboard;
+     bell_count = other.bell_count;
+     title_initialized = other.title_initialized;
++    clipboard_seqnum = other.clipboard_seqnum;
+     ds = other.ds;
+   }
+   return *this;
+@@ -384,6 +386,7 @@ void Framebuffer::reset( void )
+   rows = rows_type( height, newrow() );
+   window_title.clear();
+   clipboard.clear();
++  clipboard_seqnum = 0;
+   /* do not reset bell_count */
+ }
+ 
+diff --git a/src/terminal/terminalframebuffer.h b/src/terminal/terminalframebuffer.h
+index de938697..91d88e70 100644
+--- a/src/terminal/terminalframebuffer.h
++++ b/src/terminal/terminalframebuffer.h
+@@ -382,6 +382,7 @@ namespace Terminal {
+     title_type clipboard;
+     unsigned int bell_count;
+     bool title_initialized; /* true if the window title has been set via an OSC */
++    uint8_t clipboard_seqnum;
+ 
+     row_pointer newrow( void )
+     {
+@@ -452,7 +453,13 @@ namespace Terminal {
+     bool is_title_initialized( void ) const { return title_initialized; }
+     void set_icon_name( const title_type &s ) { icon_name = s; }
+     void set_window_title( const title_type &s ) { window_title = s; }
+-    void set_clipboard( const title_type &s ) { clipboard = s; }
++    void set_clipboard( const title_type &s )
++    {
++      clipboard = s;
++      // Rolling over 255 -> 0 is okay
++      clipboard_seqnum++;
++    }
++    uint8_t get_clipboard_seqnum ( void ) const { return clipboard_seqnum; }
+     const title_type & get_icon_name( void ) const { return icon_name; }
+     const title_type & get_window_title( void ) const { return window_title; }
+     const title_type & get_clipboard( void ) const { return clipboard; }
+@@ -469,7 +476,7 @@ namespace Terminal {
+ 
+     bool operator==( const Framebuffer &x ) const
+     {
+-      return ( rows == x.rows ) && ( window_title == x.window_title ) && ( clipboard  == x.clipboard ) && ( bell_count == x.bell_count ) && ( ds == x.ds );
++      return ( rows == x.rows ) && ( window_title == x.window_title ) && ( clipboard  == x.clipboard ) && ( clipboard_seqnum == x.clipboard_seqnum ) && ( bell_count == x.bell_count ) && ( ds == x.ds );
+     }
+   };
+ }

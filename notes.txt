@@ -1,7 +1,9 @@
 Building my own version of Mosh
--------------------------------
-
+===============================
 fmeschbe / 9-Okt-2021
+
+NOTE: mosh-server is started by the client upon SSH connection, so there is no
+      need for it to be configured with systemd !
 
 * fork https://github.com/mobile-shell/mosh
 * git clone https://github.com/fmeschbe/mosh
@@ -17,11 +19,9 @@ fmeschbe / 9-Okt-2021
 * ./autogen.sh
 * ./configure --enable-compile-warnings=error
 * make
-* make install ???
-* sudo apt install git-buildpackage
-* ./build-package.sh
+* make install
 
-Links:
+Links
 -----
 
 * https://mosh.org/#getting
